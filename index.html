@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gatewright</title>
+  <meta name="description" content="Drag, wire and simulate logic circuits right in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23F1EFE9'/%3E%3Crect x='6' y='6' width='16' height='16' fill='%231E2124'/%3E%3Crect x='10' y='10' width='16' height='16' fill='none' stroke='%235E8C6A' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo"></span><b>Gatewright</b><span class="label tagline">Design, simulate, understand.</span></div>
+    <div class="toolbar">
+      <button class="btn btn--ghost btn--sm" id="btn-undo" title="Undo (Ctrl/Cmd+Z)">Undo</button>
+      <button class="btn btn--ghost btn--sm" id="btn-redo" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
+      <span class="toolbar__sep"></span>
+      <button class="btn btn--ghost btn--sm" id="btn-new" title="Clear workspace">New</button>
+      <button class="btn btn--ghost btn--sm" id="btn-open" title="Open a saved circuit file">Open…</button>
+      <button class="btn btn--ghost btn--sm" id="btn-save" title="Download circuit as JSON">Save</button>
+      <select class="select select--sm" id="examples" title="Load an example"><option value="">Examples…</option></select>
+      <button class="btn btn--ghost btn--sm" id="btn-fit" title="Fit circuit to view">Fit</button>
+      <span class="toolbar__sep"></span>
+      <button class="btn btn--ghost btn--sm" id="btn-export" title="Export a PNG / SVG schematic (with preview &amp; settings)">Export…</button>
+      <button class="btn btn--primary btn--sm" id="btn-circuit" title="Transistor-level schematic (CMOS / BJT)">Circuit…</button>
+      <input id="file" type="file" accept=".json,application/json" hidden>
+    </div>
+  </header>
+  <main>
+    <aside id="side">
+      <div id="inspector" hidden></div>
+      <div id="palette"></div>
+    </aside>
+    <div class="stage">
+      <svg id="ws" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <pattern id="grid" patternUnits="userSpaceOnUse" width="20" height="20"><path d="M20 0H0V20" class="gline"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid)"/>
+        <g id="world"></g>
+      </svg>
+      <div id="hint" hidden>Drag parts from the left, or pick an example.</div>
+      <footer class="label">Drag from a pin to wire · click switches &amp; keys · <span class="kbd">Del</span> or right-click removes · <span class="kbd">Ctrl/⌘ Z</span> undoes · scroll zooms</footer>
+      <div class="credit"><span class="disclaimer">Educational use only · no warranty · verify before building · <a href="https://github.com/jett-mu/logicGated/blob/main/LICENCE.md" target="_blank" rel="noopener">MIT license</a></span> · <a href="https://github.com/jett-mu/logicGated" target="_blank" rel="noopener" title="github.com/jett-mu/logicGated — open source">&copy; 2026 Jett Mu</a></div>
+    </div>
+  </main>
+  <dialog id="circuit-dlg" class="dlg">
+    <div class="dlg-head"><b>Circuit export</b><span class="label">Every gate expanded into real transistors or relays</span><button class="btn btn--ghost btn--sm btn--icon" id="c-close" title="Close">&#10005;</button></div>
+    <div class="dlg-bar">
+      <label><span class="label">Technology</span>
+        <select class="select select--sm" id="c-tech"><option value="cmos">CMOS MOSFET</option><option value="bjt">BJT NPN (RTL)</option><option value="relay">Relay (electromechanical)</option></select>
+      </label>
+      <label class="chk" id="c-diode-wrap" hidden><input class="check" type="checkbox" id="c-diode"><span>Add flyback diodes <span class="label">across every coil</span></span></label>
+      <label class="chk" id="c-color-wrap"><input class="check" type="checkbox" id="c-color"><span>Color rails (BETA) <span class="label">VDD / VCC red, GND blue, with labels</span></span></label>
+      <label><span class="label">View</span>
+        <select class="select select--sm" id="c-zoom"><option value="fit">Fit to window</option><option value="full">Actual size</option></select>
+      </label>
+      <span id="c-stats" class="label"></span>
+      <span class="grow"></span>
+      <button class="btn btn--sm" id="c-svg">Download SVG</button>
+      <button class="btn btn--primary btn--sm" id="c-png">Download PNG</button>
+    </div>
+    <div id="c-preview" class="dlg-preview"></div>
+  </dialog>
+  <dialog id="export-dlg" class="dlg">
+    <div class="dlg-head"><b>Export schematic</b><span class="label">Preview &amp; settings for PNG / SVG</span><button class="btn btn--ghost btn--sm btn--icon" id="e-close" title="Close">&#10005;</button></div>
+    <div class="dlg-bar">
+      <label><span class="label">Wires</span>
+        <select class="select select--sm" id="e-wire"><option value="curve">Keep curved connections</option><option value="ortho">Straight, separated connections</option></select>
+      </label>
+      <label class="chk"><input class="check" type="checkbox" id="e-in"><span>Inputs as terminals <span class="label">switch, button, clock, number pad</span></span></label>
+      <label class="chk"><input class="check" type="checkbox" id="e-out"><span>Outputs as terminals <span class="label">bulb, display</span></span></label>
+      <label class="chk"><input class="check" type="checkbox" id="e-off"><span>Deactivate all inputs <span class="label">draw with every input low</span></span></label>
+      <label><span class="label">View</span>
+        <select class="select select--sm" id="e-zoom"><option value="fit">Fit to window</option><option value="full">Actual size</option></select>
+      </label>
+      <span class="grow"></span>
+      <button class="btn btn--sm" id="e-svg">Download SVG</button>
+      <button class="btn btn--primary btn--sm" id="e-png">Download PNG</button>
+    </div>
+    <div id="e-preview" class="dlg-preview"></div>
+  </dialog>
+  <dialog id="disclaimer-dlg" class="dlg dlg--notice" aria-labelledby="disclaimer-title">
+    <div class="dlg-head"><b id="disclaimer-title">Before you continue</b></div>
+    <div class="dlg-body">
+      <p>Gatewright is an educational tool. The software and every schematic, netlist or image it produces are provided &quot;as is&quot;, without warranty of any kind (see <a href="https://github.com/jett-mu/logicGated/blob/main/LICENCE.md" target="_blank" rel="noopener">LICENCE.md</a>).</p>
+      <p>Generated circuits, especially the transistor level export, are not verified, not checked against real component ratings, and have no protection circuitry. Do not use them for mains voltage, high current, batteries, or any safety critical purpose.</p>
+      <p>Check every design yourself before you build it. You build and use anything made with this tool at your own risk, and the author is not liable for injury, property damage or any other loss.</p>
+    </div>
+    <div class="dlg-bar">
+      <label class="chk-agree"><input class="check" type="checkbox" id="disclaimer-chk"><span>I have read, understand and agree to these terms.</span></label>
+      <span class="grow"></span>
+      <button class="btn btn--primary btn--sm" id="disclaimer-ok" disabled>Continue to app</button>
+    </div>
+  </dialog>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
