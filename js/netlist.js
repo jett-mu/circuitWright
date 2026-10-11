@@ -1,93 +1,156 @@
-// Gate-level circuit -> inverting stages (NOT / NAND2 / NOR2) + terminals.
-// Pure data, no DOM, so it can be unit-tested in Node.
-import { buildSrc } from './sim.js';
+// Turns the drawn diagram into nets (by geometry) and a flat element list for the solver.
+// Also writes a SPICE deck. DOM free.
+import { DEFS, LED_VF } from './model.js';
 
-const PRIMARY = { switch: 'SW', button: 'BTN', clock: 'CLK' };
-const HIGH = 'HIGH'; // terminal label for constant-1 sources
+const key = (p) => p.x + ',' + p.y;
 
-export function buildNetlist(circ) {
-  const src = buildSrc(circ);
-  const stages = [];
-  let tmp = 0;
-  const zeros = new Set(circ.components.filter((c) => c.type === 'const0').map((c) => `${c.id}:0`));
-  // '0' = tied to ground; a constant-0 source is just that
-  const inNet = (c, i) => { const n = src.get(`${c.id}:${i}`) ?? '0'; return zeros.has(n) ? '0' : n; };
-  const emit = (kind, ins, out) => {
-    const o = out ?? `t${++tmp}`;
-    stages.push({ id: stages.length, kind, ins, out: o });
-    return o;
-  };
-
-  for (const c of circ.components) {
-    const key = `${c.id}:0`;
-    const a = inNet(c, 0), b = inNet(c, 1);
-    switch (c.type) {
-      case 'not': emit('not', [a], key); break;
-      case 'buf': emit('not', [emit('not', [a])], key); break;
-      case 'nand': emit('nand2', [a, b], key); break;
-      case 'nor': emit('nor2', [a, b], key); break;
-      case 'and': emit('not', [emit('nand2', [a, b])], key); break;
-      case 'or': emit('not', [emit('nor2', [a, b])], key); break;
-      case 'xor': case 'xnor': {
-        const n1 = emit('nand2', [a, b]);
-        const x = emit('nand2', [emit('nand2', [a, n1]), emit('nand2', [b, n1])], c.type === 'xor' ? key : undefined);
-        if (c.type === 'xnor') emit('not', [x], key);
-        break;
-      }
-      default: break;
-    }
-  }
-
-  // Terminals. A part that is wired shows only its wired pins; a part with
-  // nothing connected still appears (so gate-less circuits export too).
-  const pick = (pins) => (pins.some((p) => p.used) ? pins.filter((p) => p.used) : pins);
-  const outputs = [];
-  let led = 0, disp = 0;
-  for (const c of circ.components) {
-    if (c.type === 'bulb') {
-      led++;
-      outputs.push(...pick([{ net: inNet(c, 0), label: `LED${led}`, used: inNet(c, 0) !== '0' }]));
-    } else if (c.type === 'display') {
-      disp++;
-      outputs.push(...pick(Array.from({ length: c.state.bits }, (_, i) => ({
-        net: inNet(c, i), label: `D${disp}[${c.state.bits - 1 - i}]`, used: inNet(c, i) !== '0',
-      }))));
-    }
-  }
-  const used = new Set([...stages.flatMap((s) => s.ins), ...outputs.map((o) => o.net)]);
-  const inputs = [];
-  const counts = {};
-  let pad = 0;
-  for (const c of circ.components) {
-    const base = PRIMARY[c.type];
-    if (base) {
-      counts[base] = (counts[base] ?? 0) + 1;
-      inputs.push(...pick([{ net: `${c.id}:0`, label: `${base}${counts[base]}`, used: used.has(`${c.id}:0`) }]));
-    } else if (c.type === 'const1') {
-      inputs.push(...pick([{ net: `${c.id}:0`, label: HIGH, used: used.has(`${c.id}:0`) }]));
-    } else if (c.type === 'numpad') {
-      const name = String.fromCharCode(65 + pad++);
-      const bits = c.state.bits;
-      inputs.push(...pick(Array.from({ length: bits }, (_, p) => ({
-        net: `${c.id}:${p}`, label: bits > 1 ? `${name}[${bits - 1 - p}]` : name, used: used.has(`${c.id}:${p}`),
-      }))));
-    }
-  }
-  return { stages, inputs, outputs };
+function onSegmentInterior(p, a, b) {
+  if (a.x === b.x && a.y === b.y) return false;
+  const cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+  if (cross !== 0) return false;
+  const dot = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
+  const len2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
+  return dot > 0 && dot < len2;
 }
 
-const FN = { not: (a) => !a[0], nand2: (a) => !(a[0] && a[1]), nor2: (a) => !(a[0] || a[1]) };
+export function buildNetlist(circ) {
+  const parent = new Map();
+  const find = (k) => {
+    if (!parent.has(k)) parent.set(k, k);
+    let r = k;
+    while (parent.get(r) !== r) r = parent.get(r);
+    while (parent.get(k) !== r) { const n = parent.get(k); parent.set(k, r); k = n; }
+    return r;
+  };
+  const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent.set(a, b); };
 
-// Evaluate the stage netlist (used by tests to prove the expansion is equivalent).
-export function evalNetlist(nl, inputValues, prev = {}) {
-  const v = { ...prev, ...inputValues, 0: 0 };
-  for (let pass = 0; pass < 100; pass++) {
-    let changed = false;
-    for (const s of nl.stages) {
-      const r = FN[s.kind](s.ins.map((n) => !!v[n])) ? 1 : 0;
-      if (v[s.out] !== r) { v[s.out] = r; changed = true; }
+  // Wires: every vertex of a polyline is one electrical point.
+  const segs = [];       // [wireId, a, b]
+  const termPts = [];    // points that may land on the middle of a segment
+  const wirePts = new Map();
+  for (const w of circ.wires) {
+    const pts = circ.wirePath(w);
+    wirePts.set(w.id, pts);
+    for (let i = 0; i < pts.length; i++) {
+      find(key(pts[i]));
+      if (i) { union(key(pts[i - 1]), key(pts[i])); segs.push([w.id, pts[i - 1], pts[i]]); }
     }
-    if (!changed) break;
+    termPts.push(pts[0], pts[pts.length - 1]);
   }
-  return v;
+  const pinPt = new Map();
+  for (const c of circ.components) {
+    DEFS[c.type].pins.forEach((_, i) => {
+      const p = circ.pinPos(c, i);
+      pinPt.set(c.id + ':' + i, p);
+      find(key(p));
+      termPts.push(p);
+    });
+  }
+  // T junctions: a pin or wire end that lands inside another wire's run joins it.
+  for (const p of termPts) for (const [, a, b] of segs) if (onSegmentInterior(p, a, b)) union(key(p), key(a));
+
+  // Net names: ground parts, named rails and labels merge by name.
+  const named = new Map();
+  let groundKey = null;
+  for (const c of circ.components) {
+    if (c.type === 'ground') {
+      const k = key(pinPt.get(c.id + ':0'));
+      if (groundKey) union(groundKey, k); else groundKey = k;
+    } else if (c.type === 'vcc' || c.type === 'netlabel') {
+      const name = String(c.params.name || '').trim().toUpperCase();
+      if (!name) continue;
+      const k = key(pinPt.get(c.id + ':0'));
+      if (name === 'GND' || name === '0') { if (groundKey) union(groundKey, k); else groundKey = k; continue; }
+      if (named.has(name)) union(named.get(name), k); else named.set(name, k);
+    }
+  }
+
+  // Net 0 is ground. Without a ground part it stays a virtual reference nothing is tied to.
+  const netOfRoot = new Map();
+  let nNets = 1;
+  const hasGround = !!groundKey;
+  if (hasGround) netOfRoot.set(find(groundKey), 0);
+  const net = (k) => {
+    const r = find(k);
+    if (!netOfRoot.has(r)) netOfRoot.set(r, nNets++);
+    return netOfRoot.get(r);
+  };
+  const pinNet = new Map(), wireNet = new Map(), netName = new Map();
+
+  const elems = [], probes = [];
+  for (const c of circ.components) {
+    const nets = DEFS[c.type].pins.map((_, i) => net(key(pinPt.get(c.id + ':' + i))));
+    nets.forEach((n, i) => pinNet.set(c.id + ':' + i, n));
+    if (c.type === 'ground' || c.type === 'vcc' || c.type === 'netlabel') {
+      if (c.type !== 'ground' && c.params.name) netName.set(nets[0], String(c.params.name));
+      continue;
+    }
+    if (c.type === 'probe') { probes.push({ id: c.id, net: nets[0], label: c.label }); continue; }
+    elems.push({ id: c.id, type: c.type, nets, p: c.params, st: c.state, label: c.label });
+  }
+  for (const w of circ.wires) wireNet.set(w.id, net(key(wirePts.get(w.id)[0])));
+  if (hasGround) netName.set(0, 'GND');
+
+  const warnings = [];
+  if (elems.length && !hasGround) warnings.push('No ground symbol: place one so voltages have a reference.');
+  return { nNets, hasGround, pinNet, wireNet, netName, elems, probes, wirePts, warnings };
+}
+
+// ---- SPICE export -----------------------------------------------------------
+export function toSpice(circ, title = 'Circuitwright export') {
+  const nl = buildNetlist(circ);
+  const N = (n) => (n === 0 ? '0' : 'N' + String(n).padStart(3, '0'));
+  const out = [`* ${title}`, '* Generated by Circuitwright. Educational use only, verify before building.'];
+  const models = new Map();
+  const model = (name, line) => { if (!models.has(name)) models.set(name, line); return name; };
+  let nint = 0;
+  const id = (e) => e.label.replace(/[^A-Za-z0-9_]/g, '') || 'X' + e.id;
+  for (const e of nl.elems) {
+    const n = e.nets.map(N), p = e.p, nm = id(e);
+    switch (e.type) {
+      case 'resistor': out.push(`R${nm} ${n[0]} ${n[1]} ${p.r}`); break;
+      case 'pot': out.push(`R${nm}a ${n[0]} ${n[2]} ${p.r * (1 - p.w / 100) + 1e-3}`, `R${nm}b ${n[2]} ${n[1]} ${p.r * (p.w / 100) + 1e-3}`); break;
+      case 'capacitor': case 'ecap': out.push(`C${nm} ${n[0]} ${n[1]} ${p.c}`); break;
+      case 'inductor': { const m = 'M' + ++nint; out.push(`R${nm} ${n[0]} ${m} ${Math.max(p.dcr, 1e-6)}`, `L${nm} ${m} ${n[1]} ${p.l}`); break; }
+      case 'vdc': out.push(`V${nm} ${n[0]} ${n[1]} DC ${p.v}`); break;
+      case 'battery': { const m = 'B' + ++nint; out.push(`V${nm} ${m} ${n[1]} DC ${p.v}`, `R${nm}i ${n[0]} ${m} ${Math.max(p.r, 1e-6)}`); break; }
+      case 'idc': out.push(`I${nm} ${n[0]} ${n[1]} DC ${p.i}`); break;
+      case 'vac': {
+        if (p.wave === 'sine') out.push(`V${nm} ${n[0]} ${n[1]} SIN(${p.offset} ${p.amp} ${p.freq} 0 0 ${p.phase})`);
+        else {
+          const T = 1 / p.freq, lo = p.offset - p.amp, hi = p.offset + p.amp, d = p.duty / 100, r = T / 1000;
+          out.push(p.wave === 'square'
+            ? `V${nm} ${n[0]} ${n[1]} PULSE(${lo} ${hi} 0 ${r} ${r} ${T * d} ${T})`
+            : p.wave === 'tri' ? `V${nm} ${n[0]} ${n[1]} PULSE(${lo} ${hi} 0 ${T / 2} ${T / 2} 0 ${T})`
+              : `V${nm} ${n[0]} ${n[1]} PULSE(${lo} ${hi} 0 ${T} ${r} 0 ${T})`);
+        }
+        break;
+      }
+      case 'diode': case 'schottky': out.push(`D${nm} ${n[0]} ${n[1]} ${model('D_' + e.type + '_' + p.is + '_' + p.n, `D(IS=${p.is} N=${p.n})`)}`); break;
+      case 'zener': out.push(`D${nm} ${n[0]} ${n[1]} ${model('DZ_' + p.vz, `D(IS=1e-14 BV=${p.vz} IBV=1e-3)`)}`); break;
+      case 'led': out.push(`D${nm} ${n[0]} ${n[1]} ${model('LED_' + p.color, `D(IS=${(0.01 * Math.exp(-LED_VF[p.color] / (2 * 0.02585))).toExponential(3)} N=2)`)}`); break;
+      case 'npn': case 'pnp': out.push(`Q${nm} ${n[1]} ${n[0]} ${n[2]} ${model(`Q${e.type}_${p.bf}_${p.is}_${p.vaf}`, `${e.type.toUpperCase()}(BF=${p.bf} IS=${p.is} VAF=${p.vaf})`)}`); break;
+      case 'nmos': case 'pmos':
+        out.push(`M${nm} ${n[1]} ${n[0]} ${n[2]} ${n[2]} ${model(`M${e.type}_${p.vth}_${p.kp}_${p.lambda}`, `${e.type.toUpperCase()}(VTO=${e.type === 'pmos' ? -p.vth : p.vth} KP=${p.kp} LAMBDA=${p.lambda})`)}`); break;
+      case 'njfet': case 'pjfet':
+        out.push(`J${nm} ${n[1]} ${n[0]} ${n[2]} ${model(`J${e.type}_${p.vto}_${p.beta}`, `${e.type === 'njfet' ? 'NJF' : 'PJF'}(VTO=${p.vto} BETA=${p.beta} LAMBDA=${p.lambda})`)}`); break;
+      case 'opamp': out.push(`B${nm} ${n[2]} 0 V=limit(${p.gain}*(V(${n[1]})-V(${n[0]}))\\,-${p.vsat}\\,${p.vsat})`.replace(/\\,/g, ',')); break;
+      case 'switch': case 'button': out.push(`R${nm} ${n[0]} ${n[1]} ${e.st.closed ? 0.01 : 1e9}`); break;
+      case 'fuse': out.push(`R${nm} ${n[0]} ${n[1]} ${e.st.blown ? 1e9 : p.r}`); break;
+      case 'lamp': out.push(`R${nm} ${n[0]} ${n[1]} ${(p.v * p.v / p.w).toFixed(3)}`); break;
+      case 'speaker': out.push(`R${nm} ${n[0]} ${n[1]} ${p.r}`); break;
+      case 'motor': { const m = 'W' + ++nint; out.push(`R${nm} ${n[0]} ${m} ${p.r}`, `L${nm} ${m} ${n[1]} ${p.l}`); break; }
+      case 'voltmeter': out.push(`R${nm} ${n[0]} ${n[1]} 10Meg`); break;
+      case 'ammeter': out.push(`V${nm} ${n[0]} ${n[1]} DC 0`); break;
+      case 'transformer': {
+        const l2 = p.lp / (p.n * p.n), m = 'T' + ++nint, s = 'T' + ++nint;
+        out.push(`R${nm}p ${n[0]} ${m} ${Math.max(p.rp, 1e-6)}`, `L${nm}p ${m} ${n[1]} ${p.lp}`, `L${nm}s ${n[2]} ${n[3]} ${l2}`, `K${nm} L${nm}p L${nm}s ${p.k}`);
+        void s; break;
+      }
+      default: out.push(`* ${e.label} (${e.type}) has no SPICE mapping`);
+    }
+  }
+  for (const [name, def] of models) out.push(name.startsWith('Q') ? `.model ${name} ${def}` : `.model ${name} ${def}`);
+  out.push('.tran 1u 10m', '.end');
+  return out.join('\n') + '\n';
 }

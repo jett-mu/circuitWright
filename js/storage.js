@@ -1,4 +1,4 @@
-const KEY = 'gatewright.autosave.v1';
+const KEY = 'circuitwright.autosave.v1';
 
 export function autosave(circ) {
   try { localStorage.setItem(KEY, JSON.stringify(circ.toJSON())); } catch { /* storage unavailable */ }
@@ -13,13 +13,17 @@ export function restore(circ) {
   } catch { return false; }
 }
 
-export function saveFile(circ) {
-  const blob = new Blob([JSON.stringify(circ.toJSON(), null, 2)], { type: 'application/json' });
+export function download(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'gatewright-circuit.json';
+  a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+export function saveFile(circ) {
+  const name = (circ.title || 'circuit').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'circuit';
+  download(new Blob([JSON.stringify(circ.toJSON(), null, 2)], { type: 'application/json' }), `circuitwright-${name}.json`);
 }
 
 export async function loadFile(circ, file) {

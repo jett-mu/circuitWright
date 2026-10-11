@@ -1,8 +1,6 @@
-# Gatewright
+# Circuitwright
 
-Design, simulate, understand. Gatewright is a browser sandbox for building logic circuits: drag parts onto a canvas, wire them together, and watch the signals propagate. It is a plain static site (HTML, CSS and ES modules) with no build step and no dependencies.
-
-Source: https://github.com/jett-mu/logicGated
+Build it. Wire it. Watch it run. Circuitwright is a free-form analog circuit sandbox in the browser: real schematic symbols, parts that rotate and flip to any orientation, and a transient simulator that shows voltages, currents and waveforms live. Plain static site (HTML, CSS, ES modules), no build step, no dependencies.
 
 ## Running it
 
@@ -12,104 +10,52 @@ ES modules do not load from `file://`, so serve the folder over http:
 python3 -m http.server 8000
 ```
 
-Then open http://localhost:8000.
+Then open http://localhost:8000. For GitHub Pages, deploy the branch root; all paths are relative and fonts are self-hosted.
 
-## Publishing on GitHub Pages
+## Parts
 
-1. Push the repository to GitHub.
-2. In Settings, Pages, choose "Deploy from a branch", branch `main`, folder `/ (root)`.
-3. Open `https://<user>.github.io/<repo>/`.
+- Sources: DC voltage, battery (internal R), AC / signal source (sine, square, triangle, saw), current source, ground, supply rail, net label.
+- Passive: resistor, potentiometer, capacitor, electrolytic, inductor, transformer, fuse (blows on I²t).
+- Switches: SPST switch, push button, changeover switch, relay.
+- Semiconductors: diode, Schottky, Zener, LED (colours), SCR, NPN, PNP, N/P-MOSFET (body diode), N/P-JFET.
+- ICs: op-amp (output clamp), 555 timer.
+- Loads and meters: lamp, motor, speaker, voltmeter, ammeter, scope probe.
 
-All paths are relative, so it works from a project subpath. The only external request is the Google Fonts import at the top of `styles.css`; offline the app falls back to system fonts.
+## Using it
 
-## What it does
-
-- Parts: switch, push button, clock (0.05 to 30 Hz), number pad, AND, OR, XOR, NAND, NOR, XNOR, NOT, BUFFER, lightbulb, display, and free wires.
-- Number pads and displays are configurable: 1 to 8 bits, binary, decimal or hex, and a selectable range on pads.
-- Wires can be open ended. Dropping a part on a wire splices it in.
-- Undo and redo, autosave to localStorage, and save/open as JSON.
-- Gate level export to PNG or SVG, with a live preview and options for curved or straight wires, terminals instead of widgets, and deactivated inputs.
-- Transistor level export (CMOS MOSFET or BJT NPN RTL) as a real schematic with hop-over arcs and junction dots.
-- Relay export: every gate built from 5-terminal changeover relays (1-2 coil, 3 normally open, 4 common, 5 normally closed) powered from one wired DC source, with optional flyback diodes across every coil and an optional red / blue power rail colouring (beta) that works for every technology.
+- Drag parts from the palette (or click one to drop it in view). `R` rotates, `F` flips, `Del` removes.
+- Drag from a pin to another pin to wire. Drag from the middle of a wire to branch it. Double-click a wire to change its route; `Shift` while drawing makes a straight diagonal.
+- Click switches. Select a part to edit values (`4.7k`, `100n`, `2.2u` are understood).
+- Probes, voltmeters and ammeters feed the scope. Hover anything for live readings. Wires colour by voltage.
+- Undo/redo, autosave to localStorage, save/open JSON, export PNG/SVG schematic with a parts list, or a SPICE netlist.
 
 ## Code layout
 
 ```
 index.html        page shell, toolbar, dialogs
 styles.css        LATCH design system (tokens and components)
-css/style.css     app layout built on the design system
+css/style.css     app layout
 js/
-  model.js        part catalogue, Circuit class, pin geometry
-  sim.js          logic simulation
-  render.js       SVG drawing of parts and wires
-  main.js         interaction, history, inspector, clocks, dialogs
-  storage.js      localStorage autosave and JSON file save/open
+  model.js        part catalogue, Circuit, geometry, wire routing, number formatting
+  netlist.js      geometry to nets, element list, SPICE writer
+  solver.js       MNA transient solver (Newton-Raphson, trapezoidal / backward Euler)
+  symbols.js      schematic symbols
+  render.js       SVG scene, hop-overs, junctions, live painting
+  scope.js        oscilloscope
+  main.js         interaction, simulation loop, inspector, dialogs
   examples.js     starter circuits
-  export.js       gate level PNG/SVG export and shared rasterizer
-  exportview.js   export-time substitutions (terminals, inputs off)
-  orthowires.js   straight, separated wire routing for the export
-  netlist.js      gates reduced to NOT / NAND2 / NOR2 stages
-  cells.js        transistor cells per technology
-  symbols.js      MOSFET, BJT, resistor, supply and ground symbols
-  schematic.js    placement, routing and SVG for the transistor export
+  export.js       PNG/SVG schematic export
+  storage.js      autosave and file save/open
 ```
 
-### Data model (`js/model.js`)
+Connectivity is geometric: wire vertices, pins and wire ends landing on a wire's run are one net; crossings without a vertex are not connected (drawn with a hop).
 
-`DEFS` is the part catalogue: label, palette group, size, and pin counts. Some parts change shape per instance, so geometry always goes through `dims(component)`, which accounts for number pad range and bit count, display width, and so on. `localPin` and `pinPos` give pin coordinates; inputs sit on the left edge and outputs on the right, spaced evenly.
+## Simulator notes
 
-A `Circuit` holds `components` and `wires`:
-
-```json
-{
-  "app": "gatewright",
-  "version": 1,
-  "components": [{ "id": 1, "type": "switch", "x": 60, "y": 60, "state": { "on": false } }],
-  "wires": [{ "id": 3, "from": { "c": 1, "p": 0 }, "to": { "c": 2, "p": 0 } }]
-}
-```
-
-A wire end is either a pin `{c, p}` or a free point `{x, y}`, which is how open ended wires are stored. An input pin accepts one wire; outputs fan out freely. Pin 0 on number pads and displays is the most significant bit, so `configure()` shifts wires when the bit count changes and new bits appear at the top.
-
-### Simulation (`js/sim.js`)
-
-`simulate(circuit, out)` is a fixed point evaluation. `out` maps `"componentId:pin"` to 0 or 1 and is reused between calls, which is what lets feedback circuits such as an SR latch hold state. Each pass walks the components in order, updating outputs in place, until nothing changes or 100 passes elapse. Only fully pinned wires carry signal. Unconnected inputs read 0.
-
-### Rendering and interaction
-
-`render.js` builds SVG with a small `el()` helper. Colors come from CSS variables (`--ink`, `--on`, `--off` and friends), so the same markup themes the live canvas and the print exports. `main.js` uses pointer events on the SVG and event delegation through `data-*` attributes (`data-pin`, `data-ctl`, `data-comp`, `data-wire`). The canvas is redrawn from the model after each change.
-
-Undo works on snapshots of the circuit, recorded whenever structure changes (parts, positions, bits, wires). Runtime values such as switch states are deliberately not part of history.
-
-### Clocks
-
-Each clock keeps a phase in the range 0 to 2 (low half, then high half). Its level is derived from elapsed time rather than accumulated toggles, so fast clocks do not drift and several clocks stay aligned. The phase is written into the saved state, so a reopened project resumes with every clock in sync. Examples always start from phase 0.
-
-### Gate level export (`export.js`, `exportview.js`, `orthowires.js`)
-
-`exportView` derives the circuit that is actually drawn: it can replace inputs and outputs with one terminal per bit, or recompute signals with every input low. `routeOrtho` assigns each net a vertical trunk and slides trunks and lanes sideways so different nets keep at least `MIN_GAP` apart, which is 1.5 times the hop diameter. `wirePrims` then adds hop arcs where nets cross and dots where three or more directions of one net meet.
-
-### Transistor level export (`netlist.js`, `cells.js`, `schematic.js`)
-
-1. `buildNetlist` reduces every gate to `not`, `nand2` and `nor2` stages (AND is NAND plus NOT, XOR is four NANDs, and so on) and collects input and output terminals.
-2. `cells.js` provides a hand drawn cell for each stage in CMOS, BJT NPN RTL or relay form.
-3. `layoutSchematic` assigns stages to columns by logic depth, orders rows by barycenter, and routes every net on unique tracks, using a lane above the cells for nets that skip columns.
-4. `wirePrims` resolves crossings and junctions, and `renderSchematic` emits the SVG with a title block.
-
-Because the output is plain SVG text with no DOM use, it can be run and checked from Node.
-
-## Styling
-
-`styles.css` is the LATCH design system: a light, matte, square cornered palette with hard offset shadows, using Chakra Petch and IBM Plex Mono. `css/style.css` only adds app layout on top of its tokens. The fonts are self-hosted in `fonts/` (SIL Open Font License, texts included), so the app makes no third party requests.
+Modified nodal analysis with a per-step Newton solve. Reactive parts start discharged. Models are educational grade: Ebers-Moll BJT with Early effect, square-law MOSFET/JFET, exponential diodes, ideal-ish op-amp with a clamp. Step size is chosen automatically from the circuit.
 
 ## Disclaimer and safety
 
-Gatewright is an educational tool. The software and every schematic, netlist or image it produces are provided "as is", without warranty of any kind (see `LICENCE.md`). Generated circuits, especially the transistor level export, are not verified, not checked against real component ratings, and have no protection circuitry. Do not use them for mains voltage, high current, batteries, or any safety critical purpose. Check every design yourself before you build it. You build and use anything made with this tool at your own risk, and the author is not liable for injury, property damage or any other loss.
-
-## Notes and limits
-
-- XOR and XNOR expand to four NAND stages in the transistor export, so they are larger than a dedicated XOR cell.
-- Open ended wires are ignored by the transistor export.
-- Straight wire routing does not route around parts; it separates wires from each other.
+Circuitwright is an educational tool, provided "as is" without warranty (see `LICENCE.md`). It does not check component ratings, power or thermal limits. Do not use designs for mains voltage, high current, batteries or anything safety critical. Verify everything yourself before building.
 
 &copy; 2026 Jett Mu
